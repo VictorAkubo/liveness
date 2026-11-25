@@ -104,7 +104,6 @@
       transition: opacity .4s;
     }
 
-    #gate .icon { font-size: 3rem; }
     #gate .tap  { font-size: 1rem; font-weight: 600; }
     #gate .fine { font-size: .75rem; color: rgba(255,255,255,.5); max-width: 220px; text-align: center; line-height: 1.6; }
 
@@ -140,7 +139,6 @@
     </div>
 
     <div id="gate">
-      <div class="icon">🙂</div>
       <div class="tap">Tap to begin</div>
       <div class="fine">Your camera is only used locally. No data leaves your device.</div>
     </div>
@@ -148,6 +146,7 @@
 
   <button id="retryBtn">Try again</button>
 
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>
