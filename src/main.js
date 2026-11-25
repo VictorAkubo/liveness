@@ -10,19 +10,18 @@ const gate     = document.getElementById("gate");
 const retryBtn = document.getElementById("retryBtn");
 
 const STEPS = [
-  { label: "Turn your head LEFT",  type: "left"       },
-  { label: "Turn your head RIGHT", type: "right"      },
-  { label: "Look UP",              type: "up"         },
-  { label: "Look DOWN",            type: "down"       },
-  { label: "Open your mouth wide", type: "mouth_open" },
-  { label: "Now blink both eyes",  type: "blink"      },
+  { label: "Turn your head LEFT",  type: "left",       hold: 4 },
+  { label: "Turn your head RIGHT", type: "right",      hold: 4 },
+  { label: "Look UP",              type: "up",         hold: 4 },
+  { label: "Look DOWN",            type: "down",       hold: 4 },
+  { label: "Open your mouth wide", type: "mouth_open", hold: 3 },
+  { label: "Now blink both eyes",  type: "blink",      hold: 2 },
 ];
 
 const YAW_DEG        = 14;
 const PITCH_DEG      = 11;
-const CTR_DEG        = 9;
 const MOUTH_OPEN_THR = 0.22;
-const BLINK_RATIO    = 0.60;
+const BLINK_RATIO    = 0.65;
 const HOLD_N         = 4;
 const CALIB_N        = 20;
 const TIMEOUT        = 90000;
@@ -38,8 +37,6 @@ let ovalColor = "#6366f1";
 let ovalGlow  = false;
 let rafId     = null;
 let faceMesh  = null;
-
-// ── dots ──────────────────────────────────────────────────────────────────────
 
 function buildDots() {
   dotsEl.innerHTML = "";
@@ -58,17 +55,6 @@ function refreshDots() {
     dot.className = i < stepIdx ? "dot done" : i === stepIdx ? "dot active" : "dot";
   });
 }
-
-// ── measurements from 468-point mesh ─────────────────────────────────────────
-//
-// YAW / PITCH — nose offset relative to eye midpoint
-//
-// MAR (Mouth Aspect Ratio):
-//   vertical opening (pt 13 → 14) / horizontal width (pt 61 → 291)
-//   closed ≈ 0–0.05, wide open ≈ 0.5+
-//
-// EAR (Eye Aspect Ratio), averaged across both eyes:
-//   lid gap / eye width — open ≈ 0.25–0.35, closed ≈ 0–0.08
 
 function dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -97,7 +83,6 @@ function getMeasurements(lm) {
   if (faceH < 1) return null;
   const pitch   = ((nose.y - eyeMidY) / faceH - 0.40) * 90;
 
-  // mouth aspect ratio
   const mTop = lpt(lm, 13,  W, H);
   const mBot = lpt(lm, 14,  W, H);
   const mL   = lpt(lm, 61,  W, H);
@@ -105,7 +90,6 @@ function getMeasurements(lm) {
   const mW   = dist(mL, mR);
   const mar  = mW > 1 ? dist(mTop, mBot) / mW : 0;
 
-  // eye aspect ratio — left eye then right eye, averaged
   const lEyeTop = lpt(lm, 159, W, H);
   const lEyeBot = lpt(lm, 145, W, H);
   const lEyeOut = lpt(lm, 33,  W, H);
@@ -122,8 +106,6 @@ function getMeasurements(lm) {
   return { yaw, pitch, mar, ear };
 }
 
-// ── challenge matching ────────────────────────────────────────────────────────
-
 function matches(type, m) {
   const dy   = m.yaw   - baseline.yaw;
   const dp   = m.pitch - baseline.pitch;
@@ -139,8 +121,6 @@ function matches(type, m) {
     default:           return false;
   }
 }
-
-// ── calibration ───────────────────────────────────────────────────────────────
 
 function calibrate(m) {
   calibBuf.push(m);
@@ -160,8 +140,6 @@ function calibrate(m) {
   subEl.textContent   = "";
   refreshDots();
 }
-
-// ── step logic ────────────────────────────────────────────────────────────────
 
 function advance() {
   held = 0;
@@ -186,27 +164,16 @@ function tick(m) {
     held++;
     ovalColor = "#22c55e";
     ovalGlow  = true;
-    subEl.textContent = `Hold… ${held}/${HOLD_N}`;
-    if (held >= HOLD_N) advance();
+    const holdNeeded = step.hold ?? HOLD_N;
+    subEl.textContent = `Hold… ${held}/${holdNeeded}`;
+    if (held >= holdNeeded) advance();
   } else {
     held      = 0;
     ovalColor = "#6366f1";
     ovalGlow  = false;
-
-    if (step.type === "mouth_open") {
-      const delta = (m.mar - baseline.mar).toFixed(3);
-      subEl.textContent = `Opening: ${delta} / ${MOUTH_OPEN_THR} needed`;
-    } else if (step.type === "blink") {
-      subEl.textContent = `EAR: ${m.ear.toFixed(3)} (need < ${(baseline.ear * BLINK_RATIO).toFixed(3)})`;
-    } else {
-      const dy = (m.yaw - baseline.yaw).toFixed(1);
-      const dp = (m.pitch - baseline.pitch).toFixed(1);
-      subEl.textContent = `↔ ${dy}°  ↕ ${dp}°`;
-    }
+    subEl.textContent = "";
   }
 }
-
-// ── canvas ────────────────────────────────────────────────────────────────────
 
 function syncSize() {
   const w = video.videoWidth  || overlay.clientWidth;
@@ -215,7 +182,7 @@ function syncSize() {
   if (overlay.height !== h) overlay.height = h;
 }
 
-function drawFrame(detected) {
+function drawFrame() {
   syncSize();
   const W = overlay.width;
   const H = overlay.height;
@@ -226,7 +193,7 @@ function drawFrame(detected) {
   const rx = W * 0.33;
   const ry = H * 0.44;
 
-  // dark vignette with oval cutout
+  // cut out the oval from the dark overlay
   ctx.save();
   ctx.fillStyle = "rgba(0,0,0,.52)";
   ctx.fillRect(0, 0, W, H);
@@ -236,7 +203,6 @@ function drawFrame(detected) {
   ctx.fill();
   ctx.restore();
 
-  // oval border
   ctx.save();
   ctx.lineWidth   = 3.5;
   ctx.strokeStyle = ovalColor;
@@ -246,8 +212,6 @@ function drawFrame(detected) {
   ctx.stroke();
   ctx.restore();
 }
-
-// ── lifecycle ─────────────────────────────────────────────────────────────────
 
 function stopCamera() {
   running = false;
@@ -289,7 +253,7 @@ function onResults(results) {
     if (!baseline) calibBuf = [];
     ovalColor = "#ef4444";
     ovalGlow  = false;
-    drawFrame(false);
+    drawFrame();
     labelEl.textContent = !baseline ? "Hold still…" : (STEPS[stepIdx]?.label ?? "");
     subEl.textContent   = "Move into the oval";
     return;
@@ -303,7 +267,7 @@ function onResults(results) {
   const m = getMeasurements(lm);
   if (m) {
     tick(m);
-    drawFrame(true);
+    drawFrame();
   }
 }
 
