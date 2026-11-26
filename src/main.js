@@ -15,24 +15,32 @@ const STEPS = [
   { label: "Look UP",              type: "up",         hold: 4 },
   { label: "Look DOWN",            type: "down",       hold: 4 },
   { label: "Open your mouth wide", type: "mouth_open", hold: 3 },
-  { label: "Now blink both eyes",  type: "blink",      hold: 2 },
+  { label: "Face in oval, blink slowly", type: "blink",      count: 3 },
 ];
 
-const YAW_DEG        = 14;
-const PITCH_DEG      = 11;
-const MOUTH_OPEN_THR = 0.22;
-const BLINK_RATIO    = 0.65;
-const HOLD_N         = 4;
-const CALIB_N        = 20;
-const TIMEOUT        = 90000;
+const YAW_DEG           = 14;
+const PITCH_DEG         = 11;
+const MOUTH_OPEN_THR    = 0.22;
+const BLINK_CLOSE_RATIO = 0.74;   // eyes need only narrow to 74% of open to count
+const BLINK_OPEN_RATIO  = 0.86;   // and reopen to 86% to complete the blink
+const BLINK_MIN_MS      = 15;     // ignore sub-frame noise
+const BLINK_MAX_MS      = 700;    // ignore long squints / closing your eyes
+const HOLD_N            = 4;
+const CALIB_N           = 20;
+const TIMEOUT           = 90000;
 
-let stream    = null;
-let running   = false;
-let baseline  = null;
-let calibBuf  = [];
-let stepIdx   = 0;
-let held      = 0;
-let startedAt = 0;
+let stream     = null;
+let running    = false;
+let baseline   = null;
+let calibBuf   = [];
+let stepIdx    = 0;
+let held       = 0;
+let blinkCount = 0;
+let eyesClosed = false;
+let closedAt   = 0;
+let openEar    = null;
+let earSmooth  = null;
+let startedAt  = 0;
 let ovalColor = "#6366f1";
 let ovalGlow  = false;
 let rafId     = null;
@@ -117,7 +125,6 @@ function matches(type, m) {
     case "up":         return dp   < -PITCH_DEG;
     case "down":       return dp   >  PITCH_DEG;
     case "mouth_open": return dmar >  MOUTH_OPEN_THR;
-    case "blink":      return m.ear < baseline.ear * BLINK_RATIO;
     default:           return false;
   }
 }
@@ -133,7 +140,13 @@ function calibrate(m) {
   if (calibBuf.length < CALIB_N) return;
 
   const mean = key => calibBuf.reduce((s, x) => s + x[key], 0) / calibBuf.length;
-  baseline = { yaw: mean("yaw"), pitch: mean("pitch"), mar: mean("mar"), ear: mean("ear") };
+
+  // Use a high percentile for the open-eye reference, not the mean: a blink or
+  // half-closed eyes while calibrating must not drag the threshold down.
+  const ears = calibBuf.map(x => x.ear).sort((a, b) => a - b);
+  const openEarRef = ears[Math.floor((ears.length - 1) * 0.75)];
+
+  baseline = { yaw: mean("yaw"), pitch: mean("pitch"), mar: mean("mar"), ear: openEarRef };
   calibBuf = [];
   ovalColor = "#6366f1";
   labelEl.textContent = STEPS[0].label;
@@ -142,7 +155,12 @@ function calibrate(m) {
 }
 
 function advance() {
-  held = 0;
+  held       = 0;
+  blinkCount = 0;
+  eyesClosed = false;
+  closedAt   = 0;
+  openEar    = null;
+  earSmooth  = null;
   stepIdx++;
   refreshDots();
   if (stepIdx >= STEPS.length) {
@@ -159,6 +177,48 @@ function tick(m) {
   if (!baseline) { calibrate(m); return; }
 
   const step = STEPS[stepIdx];
+
+  if (step.type === "blink") {
+    // Light smoothing keeps landmark jitter from faking blinks without
+    // hiding a fast one (most of the new value still comes through).
+    earSmooth = earSmooth == null ? m.ear : earSmooth + (m.ear - earSmooth) * 0.65;
+
+    // Track the current open-eye level so thresholds follow this face/camera
+    // instead of relying only on the one-off calibration measurement.
+    if (openEar == null) openEar = baseline.ear;
+    const closeThr = openEar * BLINK_CLOSE_RATIO;
+    const openThr  = openEar * BLINK_OPEN_RATIO;
+    const now      = performance.now();
+
+    if (!eyesClosed && earSmooth <= closeThr) {
+      eyesClosed = true;
+      closedAt   = now;
+      ovalColor  = "#22c55e";
+      ovalGlow   = true;
+    } else if (eyesClosed) {
+      if (earSmooth >= openThr) {
+        const dur = now - closedAt;
+        eyesClosed = false;
+        ovalColor  = "#6366f1";
+        ovalGlow   = false;
+        if (dur >= BLINK_MIN_MS && dur <= BLINK_MAX_MS) blinkCount++;
+      } else if (now - closedAt > BLINK_MAX_MS) {
+        // Eyes stayed shut too long to be a blink — rearm without counting.
+        eyesClosed = false;
+        ovalColor  = "#6366f1";
+        ovalGlow   = false;
+      }
+    } else if (earSmooth > closeThr) {
+      // Adapt the open-eye reference while eyes are open. Rise quickly so wide
+      // eyes raise the bar, fall slowly so a passing squint doesn't skew it.
+      const alpha = earSmooth > openEar ? 0.25 : 0.03;
+      openEar += (earSmooth - openEar) * alpha;
+    }
+
+    subEl.textContent = `Blinks: ${blinkCount}/${step.count}`;
+    if (blinkCount >= step.count) advance();
+    return;
+  }
 
   if (matches(step.type, m)) {
     held++;
@@ -249,7 +309,10 @@ function onResults(results) {
   const lm = results.multiFaceLandmarks?.[0];
 
   if (!lm) {
-    held = 0;
+    held       = 0;
+    eyesClosed = false;
+    closedAt   = 0;
+    earSmooth  = null;
     if (!baseline) calibBuf = [];
     ovalColor = "#ef4444";
     ovalGlow  = false;
@@ -275,12 +338,17 @@ async function run() {
   gate.classList.add("hidden");
   retryBtn.style.display = "none";
 
-  baseline  = null;
-  calibBuf  = [];
-  stepIdx   = 0;
-  held      = 0;
-  ovalColor = "#6366f1";
-  ovalGlow  = false;
+  baseline   = null;
+  calibBuf   = [];
+  stepIdx    = 0;
+  held       = 0;
+  blinkCount = 0;
+  eyesClosed = false;
+  closedAt   = 0;
+  openEar    = null;
+  earSmooth  = null;
+  ovalColor  = "#6366f1";
+  ovalGlow   = false;
 
   buildDots();
   labelEl.textContent = "Loading models…";
