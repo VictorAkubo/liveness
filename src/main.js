@@ -15,7 +15,7 @@ const STEPS = [
   { label: "Look UP",              type: "up",         hold: 4 },
   { label: "Look DOWN",            type: "down",       hold: 4 },
   { label: "Open your mouth wide", type: "mouth_open", hold: 3 },
-  { label: "Face in oval, blink once", type: "blink", count: 1 },
+  { label: "Face in oval, blink", type: "blink", count: 1 },
 ];
 
 const YAW_DEG        = 14;
@@ -27,13 +27,15 @@ const TIMEOUT        = 90000;
 
 // Simple, reliable single-blink detection
 const BLINK = {
-  CLOSE_RATIO: 0.60,      // Eye closed at 60% of open
-  OPEN_RATIO:  0.80,      // Eye open at 80% of open
-  MIN_MS:      50,        // Minimum blink duration
-  MAX_MS:      500,       // Maximum blink duration
-  SMOOTH:      0.3,       // EAR smoothing
+  CLOSE_RATIO:  0.60,     // Eye closed at 60% of open
+  OPEN_RATIO:   0.80,     // Eye open at 80% of open
+  MIN_MS:       80,       // Minimum blink duration
+  MAX_MS:       600,      // Maximum blink duration
+  SMOOTH:       0.35,     // EAR smoothing
   CALIB_FRAMES: 30,
-  OPEN_PCT:    0.85,      // 85th percentile for baseline
+  OPEN_PCT:     0.85,     // 85th percentile for baseline
+  ARM_FRAMES:   5,        // Consecutive open frames in oval before arming
+  CLOSE_FRAMES: 2,        // Consecutive closed frames to confirm closure
 };
 
 let stream     = null;
@@ -55,10 +57,22 @@ const B = {
   openEar: null,
   ear: null,
   state: "OPEN",       // OPEN | CLOSED
+  armed: false,
+  openFrames: 0,
+  closeFrames: 0,
   closedAt: 0,
   blinkCount: 0,
   done: false,
 };
+
+function resetBlink() {
+  B.state = "OPEN";
+  B.armed = false;
+  B.openFrames = 0;
+  B.closeFrames = 0;
+  B.closedAt = 0;
+  B.ear = null;
+}
 
 function buildDots() {
   dotsEl.innerHTML = "";
@@ -134,7 +148,11 @@ function getMeasurements(lm) {
   const earR = getEAR(lm, W, H, false);
   const ear  = (earL + earR) / 2;
 
-  return { yaw, pitch, mar, ear };
+  const dx = (nose.x - W * 0.5) / (W * 0.33);
+  const dy = (nose.y - H * 0.44) / (H * 0.44);
+  const inOval = dx * dx + dy * dy < 0.55;
+
+  return { yaw, pitch, mar, ear, inOval };
 }
 
 function matches(type, m) {
@@ -193,7 +211,7 @@ function advance() {
   ovalGlow  = false;
 
   // Reset blink for new step
-  B.state = "OPEN";
+  resetBlink();
   B.blinkCount = 0;
   B.done = false;
 }
@@ -204,47 +222,77 @@ function tick(m) {
   const step = STEPS[stepIdx];
   const now = performance.now();
 
-  // Smooth EAR
-  B.ear = B.ear + (m.ear - B.ear) * BLINK.SMOOTH;
-
   const closeThr = B.openEar * BLINK.CLOSE_RATIO;
   const openThr  = B.openEar * BLINK.OPEN_RATIO;
 
   if (step.type === "blink") {
+    if (B.done) return;
+
+    const dyaw = Math.abs(m.yaw - baseline.yaw);
+    const dpitch = Math.abs(m.pitch - baseline.pitch);
+    if (!m.inOval || dyaw > YAW_DEG || dpitch > PITCH_DEG) {
+      resetBlink();
+      ovalColor = "#ef4444";
+      ovalGlow = false;
+      subEl.textContent = m.inOval ? "Look straight ahead" : "Move face into oval";
+      return;
+    }
+
+    // Smooth EAR
+    B.ear = B.ear === null ? m.ear : B.ear + (m.ear - B.ear) * BLINK.SMOOTH;
+
     if (B.state === "OPEN") {
+      if (!B.armed) {
+        if (B.ear >= openThr) {
+          B.openFrames++;
+          if (B.openFrames >= BLINK.ARM_FRAMES) {
+            B.armed = true;
+            ovalColor = "#6366f1";
+            ovalGlow = false;
+            subEl.textContent = "";
+          }
+        } else {
+          B.openFrames = 0;
+        }
+        return;
+      }
+
       // Detect eye closure
       if (B.ear <= closeThr) {
-        B.state = "CLOSED";
-        B.closedAt = now;
-        ovalColor = "#22c55e";
-        ovalGlow = true;
-        subEl.textContent = "Eyes closed…";
+        B.closeFrames++;
+        if (B.closeFrames >= BLINK.CLOSE_FRAMES) {
+          B.state = "CLOSED";
+          B.closedAt = now;
+          B.closeFrames = 0;
+          ovalColor = "#22c55e";
+          ovalGlow = true;
+          subEl.textContent = "Eyes closed…";
+        }
+      } else {
+        B.closeFrames = 0;
       }
     } else { // CLOSED
       // Detect reopening
       if (B.ear >= openThr) {
         const dur = now - B.closedAt;
         B.state = "OPEN";
-        ovalColor = "#6366f1";
-        ovalGlow = false;
+        B.closeFrames = 0;
 
         if (dur >= BLINK.MIN_MS && dur <= BLINK.MAX_MS) {
           B.blinkCount++;
           B.done = true;
-          subEl.textContent = `✓ Blink detected (${dur.toFixed(0)}ms)`;
+          subEl.textContent = "✓ Blink detected";
           ovalColor = "#22c55e";
           ovalGlow = true;
           setTimeout(() => advance(), 500);
         } else {
-          subEl.textContent = dur < BLINK.MIN_MS ? "⚠ Too fast, blink naturally" : "⚠ Too slow, try again";
+          B.armed = false;
+          B.openFrames = 0;
+          subEl.textContent = dur < BLINK.MIN_MS ? "Too fast, blink naturally" : "Too slow, try again";
           ovalColor = "#ef4444";
           ovalGlow = true;
         }
       }
-    }
-
-    if (!B.done) {
-      subEl.textContent = `Blinks: ${B.blinkCount}/${step.count}  |  EAR: ${B.ear.toFixed(3)}`;
     }
     return;
   }
@@ -339,6 +387,7 @@ function onResults(results) {
 
   if (!lm) {
     held = 0;
+    resetBlink();
     ovalColor = "#ef4444";
     ovalGlow  = false;
     drawFrame();
@@ -374,9 +423,7 @@ async function run() {
   B.calibFrames = 0;
   B.earHistory  = [];
   B.openEar     = null;
-  B.ear         = null;
-  B.state       = "OPEN";
-  B.closedAt    = 0;
+  resetBlink();
   B.blinkCount  = 0;
   B.done        = false;
 
